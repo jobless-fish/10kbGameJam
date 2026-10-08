@@ -1,0 +1,3 @@
+# Keep line endings exactly as committed. The entry is measured in bytes, and a checkout on Windows
+# that turned LF into CRLF would make it one byte longer.
+* -text

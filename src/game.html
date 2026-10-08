@@ -1,0 +1,410 @@
+<script>
+// LUNA CRUENTA - a splatter arcade game in four colours and under 10KB.
+// You are chained to a spiked ball. Swing it. Whatever gets spilled stays on the floor.
+// The page itself is written from here, so that it gets packed along with the code.
+document.write('<style>*{touch-action:none}body{background:#12080c}canvas{position:fixed;inset:0;margin:auto;image-rendering:pixelated;cursor:none}</style><canvas id=cq width=160 height=144>');
+const W=160,H=144,TOP=9,
+X=cq.getContext('2d'),I=X.createImageData(W,H),U=new Uint32Array(I.data.buffer),
+F=new Uint8Array(W*H),  // the frame, as palette indexes
+G=new Uint8Array(W*H),  // the floor, and everything spilled on it
+P=[0xff0c0812,0xff1e0f5c,0xff2c14d6,0xffc4e2f0],  // black, dried blood, fresh blood, bone
+CH=' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+<.',FONT='__FONT__',  // 3x5 font, 15 bits a glyph; + is drawn as a dagger
+S='__SPRITES__'.match(/.{64}/g),
+// the bosses, one digit a pixel: 0-3 are the palette, 4 is clear. Each is stored as two strips 28 rows tall, column by column,
+// so that the pixel to the left is always 28 characters back - which the packer is told to look at.
+// The queen is 68x56. The horror is 68x40 (padded to 56), stored as its right half and mirrored. The title letters are nine 11x28 cells.
+BS=[...'__QUEEN__'],SQ=[...'__HORROR__'],TF='__LETTERS__',
+// what scrolls past at the very end; the numbers are joined on after the last word
+END='THEY CHAINED YOU TO THE IRON|AND THREW YOU TO THE DEAD|YOU SWUNG THE CHAIN INSTEAD||THE QUEEN FELL|THE HORROR FELL|THE THRONE DOES NOT CARE|WHO SITS ON IT||ONLY THE BLOOD REMAINS..||KILLS ',
+// the dead: shambler, runner, spitter, bloater, brute - radius, speed, and how much they spill
+R=[4,3,4,5,8],SP=[.3,.65,.35,.26,.22],GORE=[14,10,14,34,50],
+UP=['LONGER CHAIN','BIGGER BALL','FASTER SPIN','FASTER LEGS','EXTRA HEART','BLOOD AWAKENING'],MX=[4,2,4,4,3],  // upgrades, and how often each can be taken; the last is the one card at the end
+// last words, one picked at random
+DIE='NOTHING PERSONAL KID|I WAS ALREADY DEAD INSIDE|SO THIS IS HOW A GOD BLEEDS'.split('|'),
+rnd=Math.random,hyp=Math.hypot,cl=(v,a,b)=>v<a?a:v>b?b:v;
+let st=0,px=80,py=76,tx=80,ty=76,mx=0,my=0,lx,ly,bx,by,ox,oy,bs,hp,inv,sc,cb,ct,nx,drip,u,xp,lv,hc,dq,op=[],
+// ph: 0 before the queen, 1 before the horror, 2 the slow flood after it, 3 the last rush, 9 infinity mode (no bosses). bk: which boss is in the room.
+// boss: health, full health, death throes, hit flash, attack clock, position, attack angle and timing, where the tentacle ring is
+ph,bk,bh,bm,bd,bi,ba,bX,bY,wa,wt,mX,mY,
+// bl: frames of blood creeping in from the walls. tg: how much of the floor should be red; cv: how much is.
+// k2: clock for the last two phases. kc, lit: kills and blood for the final tally. m1,m2,mt: the two lines on screen and how long they stay.
+// RK: the three best [name, score] on this machine. ne: the name being typed. won: the game has been finished here. nf: infinity mode chosen.
+bl,tg,cv,k2,kc,lit,m1,m2,mt,ED,zm,fd,dc,ne,won,nf,RK=[],
+tm=0,dt=0,sh=0,fl=0,hs=0,acc=0,T=0,Z=1,nt=0,ni=0,E=[],Q=[],D=[],B=[],A,M,NB;
+try{won=localStorage.pulpW;RK=JSON.parse(localStorage.pulpR)}catch(e){}
+
+const put=(x,y,v)=>{x|=0;y|=0;x>=0&&x<W&&y>=0&&y<H&&(F[y*W+x]=v)},
+ink=(x,y,v)=>{x|=0;y|=0;x>1&&x<W-2&&y>TOP+1&&y<H-2&&(G[y*W+x]=v)},
+
+box=(x,y,w,h,v)=>{for(let i=w*h;i--;)put(x+i%w,y+(i/w|0),v)},
+
+// sprite pixels: 0 clear, 1 black, 2 red, 3 bone - or everything in colour v
+spr=(s,x,y,f,z=1,v)=>[...s].map((q,i)=>{if(q>0)for(let k=z*z;k--;)put(x+((f?7-i%8:i%8)-4)*z+k%z,y+((i>>3)-4)*z+(k/z|0),v??(q<2?0:q))}),
+
+// 3x5 font, 15 bits a glyph, centred unless x is given
+txt=(s,y,z=1,v=3,x=80-s.length*2*z)=>[...s].map((ch,j)=>{for(let i=15;i--;)if(FONT[CH.indexOf(ch)*15+i]>0)for(let k=z*z;k--;)put(x+(j*4+i%3)*z+k%z,y+(i/3|0)*z+(k/z|0),v)}),
+
+// one voice: n=1 is noise through a low-pass at f, otherwise an oscillator sliding from f to f*k
+snd=(f,d,n,v=.2,t,k=.25,w='sawtooth')=>{
+  if(!A)return;
+  t=t||A.currentTime;
+  let g=A.createGain(),s,l;
+  if(n)s=A.createBufferSource(),s.buffer=NB,l=A.createBiquadFilter(),l.frequency.value=f,s.connect(l).connect(g);
+  else s=A.createOscillator(),s.type=w,s.frequency.setValueAtTime(f,t),s.frequency.exponentialRampToValueAtTime(f*k,t+d),s.connect(g);
+  g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.001,t+d);
+  g.connect(M);s.start(t);s.stop(t+d)
+},
+
+/*MUSIC*/
+
+// fresh floor: bare, inside a wall
+floor=()=>{for(let i=W*H;i--;){let x=i%W,y=(i/W|0)-TOP;G[i]=y>=0&&(x<2||x>W-3||y<2||y>H-TOP-3)}},
+
+// blood creeps: n random cells that touch fresh blood turn red too. lim keeps it near the walls.
+grow=(n,lim)=>{for(;n--;){let j=rnd()*W*H|0,x=j%W,y=j/W|0;G[j]<2&&Math.min(x-2,W-3-x,y-TOP-2,H-3-y)<lim*rnd()&&(G[j-1]>1||G[j+1]>1||G[j-W]>1||G[j+W]>1)&&ink(x,y,2)}},
+
+// 0-15 in a diagonal pattern: pixels below a rising threshold go black, which is how the screen fades in four colours
+dk=i=>i%W*5+(i/W|0)*3&15,
+
+// a filled ellipse
+disc=(x,y,a,b,v)=>{for(let i=-b;i<=b;i++){let w=a*Math.sqrt(1-i*i/(b*b+b))|0;box(x-w,y+i,w*2+1,1,v)}},
+
+// a banded tentacle n tall, standing on x,y: bone in play, black in the last picture
+tent=(x,y,n,w,v=3)=>{for(let i=n;i--;)box(x+Math.sin(i*.4+w)*2-2,y-i,5-(i>>3),1,i%5?v:0)},
+
+// a dead branch from x,y, heading along a for n steps, forking until the twigs are short; each twig ends in a drip
+br=(x,y,a,n)=>{for(let i=n;i--;)box(x+=Math.cos(a+=Math.sin(i)/9),y+=Math.sin(a),1+n/12|0,1+n/12|0,0);n>7?(br(x,y,a+.5,n*.6|0),br(x,y,a-.6,n*.7|0)):box(x,y,1,n+4,0)},
+
+// is this score good enough for the board of three?
+qual=()=>sc>(RK[2]||[0,0])[1],
+
+// two lines across the middle of the screen for a few seconds, while play goes on
+say=(a,b)=>{m1=a;m2=b;mt=300},
+
+// a puddle at x,y and n drops thrown along vx,vy; every seventh drop is a chip of bone
+splat=(x,y,vx,vy,n)=>{
+  lit+=n;
+  for(let i=n*3;i--;){let a=rnd()*7,r=rnd()*rnd()*n/2;ink(x+Math.cos(a)*r,y+Math.sin(a)*r,2)}
+  for(;n--;)D.push([x,y,vx*(.3+rnd())+rnd()*3-1.5,vy*(.3+rnd())+rnd()*3-1.5,6+rnd()*14|0,n%7?2:3])
+},
+
+hurt=()=>{
+  if(inv>0||st!=1||ph>1&&ph<9)return;  // nothing can kill you once the horror is dead
+  hp--;inv=90;fl=5;sh=10;hs=8;snd(160,.4);
+  // shove the crowd back so there is room to breathe
+  E.map(e=>{let dx=e.x-px,dy=e.y-py,d=hyp(dx,dy)||1;if(d<40)e.kx=dx/d*3,e.ky=dy/d*3});
+  if(!hp)st=2,dt=0,dq=DIE[rnd()*3|0],splat(px,py,0,0,90),snd(60,1)
+},
+
+kill=(e,vx,vy)=>{
+  if(e.d)return;
+  e.d=1;
+  let t=e.t;
+  splat(e.x,e.y,vx,vy,GORE[t]);
+  cb=ct>0?cb+1:1;ct=50;sc+=cb;sh=t>2?7:3;drip=40;t>2&&(hs=4);kc++;
+  snd(300+rnd()*900,.12+t*.04,1);
+  (t>3||rnd()<.03)&&hc<tm&&(hc=tm+600,Q.push([e.x,e.y,500]));  // brutes leave a heart, but only one drops every 10 seconds
+  // enough kills and the game stops to offer up to three random upgrades
+  st==1&&++xp>=4+lv*lv&&(xp=0,op=[0,1,2,3,4].filter(i=>u[i]<MX[i]).sort(_=>rnd()-.5).slice(0,3),op[0]+1&&(lv++,st=3,dt=0));
+  // bloaters burst, and take the neighbours with them - and you, if you stand too close
+  if(t==3){E.map(f=>hyp(f.x-e.x,f.y-e.y)<22&&kill(f,(f.x-e.x)/6,(f.y-e.y)/6));hyp(px-e.x,py-e.y)<14&&hurt()}
+},
+
+// the upgrade cards sit side by side, centred; this is the one under the pointer
+hov=()=>Math.floor((mx-5-(3-op.length)*25)/50),
+
+// take card i, once all of them have landed
+pick=(i=hov())=>{
+  if(st!=3||dt<36||!(i>=0&&i<op.length))return;
+  i=op[i];
+  // the last card maxes everything and starts the rush; any other is one step of one upgrade (a new heart also refills the old ones)
+  i>4?(u=[4,2,4,4,3],hp=6,ph=3,k2=0,fl=9,snd(50,1,0,.5)):(u[i]++,i>3&&(hp=3+u[4]));
+  st=1;snd(660,.3,0,.1,0,2,'square')
+},
+
+go=()=>{
+  if(st&1||st>3||st&&dt<60)return;
+  // where the browser held the sound back until a touch, the first touch only lets it out, so that the title is heard; the next one starts
+  if(A&&A.state>'s'&&!A.w)return A.w=fl=9;
+  floor();st=1;px=bx=ox=tx=80;py=by=oy=ty=76;u=[0,0,0,0,0];hp=3;mX=80;mY=99;ph=nf?9:0;dc=bh=bd=bl=tg=k2=kc=lit=mt=ni=hc=xp=lv=inv=sc=cb=ct=tm=nx=drip=0;E=[];Q=[];D=[];B=[]
+},
+
+step=()=>{
+  tm++;inv--;ct--;
+  for(let i=60;i--;){let j=rnd()*W*H|0;G[j]==2&&(G[j]=1)}  // blood dries
+  D=D.filter(d=>{d[0]+=d[2];d[1]+=d[3];d[2]*=.88;d[3]*=.88;(d[5]<3||!d[4])&&ink(d[0],d[1],d[5]);return d[4]--});
+  if(!st)return;
+  cv=(G.reduce((a,v)=>a+(v&&v<3),0)-1164)/204.36;  // percent of the floor that is red
+  mt--;
+  bl-->0&&grow(300,30*rnd());
+  cv<tg&&grow(4e3,1e3);
+  let dx,dy,d,live=st==1;
+  if(live){
+    // you run after the pointer
+    tx=cl(tx,5,W-6);ty=cl(ty,TOP+6,H-6);
+    dx=tx-px;dy=ty-py;d=hyp(dx,dy);
+    if(d>.5)d=Math.min(1.4+u[3]*.2,d*.25)/d,px+=dx*d,py+=dy*d;
+
+    // the ball: verlet point on a rope that can only pull
+    dx=(bx-ox)*.99;dy=(by-oy)*.99;ox=bx;oy=by;bx+=dx;by+=dy;
+    dx=bx-px;dy=by-py;d=hyp(dx,dy);
+    let l=20+u[0]*5;
+    if(d>l){
+      // SPIN: a taut chain keeps pushing the ball the way it is already turning
+      let s=u[2]*.008*(Math.sign((bx-ox)*dy-(by-oy)*dx)||1)/d;
+      bx=px+dx/d*l+dy*s;by=py+dy/d*l-dx*s
+    }
+    bx=cl(bx,4,W-5);by=cl(by,TOP+4,H-5);
+    bs=hyp(bx-ox,by-oy);
+    drip-->0&&ink(bx,by,2);
+
+    // the dead come in from the walls, faster and nastier as the danger clock runs. It stops while a boss is in the room.
+    bh>0||dc++;
+    if(--nx<0&&E.length<(ph==3?140:90)){
+      let r=rnd(),a=rnd()*4|0,v=rnd(),x=a<2?4+v*152:a<3?4:W-5,y=a<2?a?TOP+4:H-5:TOP+4+v*127;
+      if(hyp(x-px,y-py)>50)nx=ph==3?Math.max(1,12-k2/40):Math.max(80-dc/160,ph>8?72e3/(3e3+dc):10)*(bh>0?3:1),E.push({x,y,kx:0,ky:0,t:ph==3?1:dc>2700&&r<.1?4:dc>1800&&r<.2?3:dc>1500&&r<.3?2:dc>900&&r<.5?1:0})
+    }
+    Q=Q.filter(q=>hyp(q[0]-px,q[1]-py)<8?(hp<3+u[4]?hp++:sc+=5,snd(1200,.15),0):q[2]--);
+    // after the horror the world runs at a third of its speed and flickers while the floor fills; then one last card;
+    // then ten seconds of everything running at you, a roar, and the end
+    if(ph==2)tm%45||(fl=3),++k2>160&&(op=[5],st=3,dt=k2=0);
+    if(ph==3&&++k2>600){
+      for(let i=W*H;i--;)ink(i%W,i/W|0,2);
+      st=4;dt=0;fl=20;sh=30;ni=256;snd(40,3,0,.6);snd(300,2,1,.5);  // the music starts its sixteen bars again, slowly
+      ED=(END+kc+'|BLOOD SPILLED '+(lit/8|0)+' LITRES||SCORE '+sc).split('|');
+      try{localStorage.pulpW=won=1}catch(e){}
+    }
+    // 500 points wakes the queen; 1000, once she is dead, wakes the horror. Everything on the floor bursts as they arrive.
+    if(bh<1&&bd<1&&ph<2&&mt<1&&sc>=500+ph*500)
+      E.map(e=>splat(e.x,e.y,0,0,GORE[e.t])),E=[],B=[],bk=ph,bm=bh=bk?45:30,bX=46,bY=-60,ba=-60,bi=60,fl=6,sh=20,hs=20,snd(50,1.5,0,.5),
+      say('',bk?'+ I HAVE EATEN A THOUSAND KINGS +':'+ WHO DARES CHALLENGE THE THRONE +');
+    if(bh>0){
+      ba++;bi--;
+      bY+=(12+Math.sin(tm/30)*3-bY)*.05;  // they settle near the top, bobbing
+      let cx=bX+(bk?34:30),cy=bY+(bk?22:32),n=bh<bm/2?100:150,k=ba%n,ax,ay;
+      if(bk){
+        // one of its orbs spits a fan at you
+        k==20&&[-.4,-.2,0,.2,.4].map(a=>B.push([cx+15,bY+14,Math.cos(a+=Math.atan2(py-cy,px-cx))*.8,Math.sin(a)*.8]));
+        // its tentacle: a ring hunts you, holds still, then the thing bursts up through it and slaps once toward you
+        wt=k-90;
+        k<70&&(mX+=cl(px-mX,-.8,.8),mY+=cl(py-mY,-.8,.8));
+        wt||(wa=Math.atan2(py-mY,px-mX),sh=4,snd(300,.2,1,.3),splat(mX,mY,0,0,12));
+        wt>=0&&wt<20&&hyp(px-mX,py-mY)<7&&hurt();
+        ax=Math.cos(wa);ay=Math.sin(wa);d=(px-mX)*ax+(py-mY)*ay;
+        wt>10&&wt<18&&d>0&&d<28&&Math.abs((px-mX)*ay-(py-mY)*ax)<4&&hurt()
+      }else{
+        bX=cl(bX+cl((px-30-bX)*.02,-.3,.3),2,W-70);  // the queen drifts after you
+        // a ring of fire from her orb, turned a little each time
+        k==1&&[...Array(12)].map((_,i)=>B.push([bX+60,bY+30,Math.cos(i=i*.524+ba)*.7,Math.sin(i)*.7]));
+        // the beam from her open hand: she aims at where you stand, shows the line, then fires along it
+        wt=k-(n>>1);
+        let hx=bX+4,hy=bY+39;
+        wt||(wa=Math.atan2(py-hy,px-hx));
+        ax=Math.cos(wa);ay=Math.sin(wa);
+        wt==41&&(sh=5,snd(4e3,.15,1,.4));
+        wt>40&&wt<48&&(px-hx)*ax+(py-hy)*ay>0&&Math.abs((px-hx)*ay-(py-hy)*ax)<4&&hurt()
+      }
+      // touching them hurts you; a fast ball hurts them, twice as much at full swing
+      ((px-cx)/13)**2+((py-cy)/24)**2<1&&hurt();
+      if(bi<0&&bs>1.1&&((bx-cx)/(15+u[1]*4))**2+((by-cy)/(26+u[1]*4))**2<1){
+        bh-=bs>2.4?2:1;bi=20;sh=5;hs=3;splat(bx,by,bx-ox,by-oy,20);snd(200,.2,1,.4);
+        bh>0||(bd=150,B=[])
+      }
+    }
+    // they take a while to come apart. The queen's death bleeds the walls; the horror's floods the floor.
+    if(bd>0){
+      bd--%8||(splat(bX+rnd()*50,bY+rnd()*45,rnd()*6-3,rnd()*6-3,30),sh=6,snd(100+rnd()*200,.3,1));
+      if(!bd){
+        sc+=100;fl=8;snd(60,2,0,.5);hp=3+u[4];dc=Math.max(0,dc-2400);  // a boss's death heals you and winds the danger back 40 seconds
+        if(ph++)tg=100,k2=0,say('+ USURPER +','THE THRONE IS EMPTY NOW');
+        else{bl=260;say('+ REGICIDE +','NOW YOU ARE THE MONSTER');for(let i=W;i--;)ink(i,TOP+2,2),ink(i,H-3,2),ink(2,i,2),ink(W-3,i,2)}
+      }
+    }
+    // spit flies straight until it finds you or a wall
+    B=B.filter(b=>{b[0]+=b[2];b[1]+=b[3];return hyp(b[0]-px,b[1]-py)<3?(hurt(),0):b[0]>2&&b[0]<W-3&&b[1]>TOP+2&&b[1]<H-3})
+  }
+  E.map((e,i)=>{
+    let t=e.t,r=R[t],s=SP[t]*(ph==3?2+k2/300:Math.min(ph>8?9:1.5,1+dc/12e3)),h=r+4+u[1]*4;
+    dx=px-e.x;dy=py-e.y;d=hyp(dx,dy)||1;
+    e.f=dx<0;
+    // spitters hang back and spit a spread of three, so standing in one place gets you hit
+    if(t==2&&d<60){
+      s=0;
+      live&&(e.c=-~e.c)%120<1&&(snd(500,.1,0,.1),[-.3,0,.3].map(a=>{a+=Math.atan2(dy,dx);B.push([e.x,e.y,Math.cos(a)*.85,Math.sin(a)*.85])}))
+    }
+    e.x=cl(e.x+dx/d*s+e.kx,4,W-5);e.y=cl(e.y+dy/d*s+e.ky,TOP+4,H-5);
+    e.kx*=.85;e.ky*=.85;
+    // keep the crowd from stacking
+    for(let j=i;++j<E.length;){let f=E[j],ax=f.x-e.x,ay=f.y-e.y,q=hyp(ax,ay)||1,o=(r+R[f.t]-1-q)/q/2;if(o>0)e.x-=ax*o,e.y-=ay*o,f.x+=ax*o,f.y+=ay*o}
+    if(live){
+      d<r+1&&hurt();
+      dx=bx-e.x;dy=by-e.y;d=hyp(dx,dy)||1;
+      if(d<h){
+        if(bs>(t>3?2.4:1.1))kill(e,bx-ox,by-oy);
+        else if(t>3)bx=e.x+dx/d*h,by=e.y+dy/d*h;  // too slow: it just thuds off a brute
+        else e.kx=bx-ox,e.ky=by-oy  // a lazy ball only shoves
+      }
+    }
+  });
+  E=E.filter(e=>!e.d)
+},
+
+// the last picture, all in silhouette: a light low over a red sea, the stumps of the tentacles, and the back of a
+// throne with your head and shoulders above it, edged with that light. k is how far you still have to sit down.
+scene=k=>{
+  F.fill(0,9*W,52*W);F.fill(2,52*W);
+  disc(80,31,13,13,3);
+  for(let i=50;i--;)box(i*37%W,54+i*53%90,6+i%9,1,1);  // the swell
+  for(let i=9;i--;)box(73+i*5%14,54+i*4,3+i%3*3,1,3);  // the light on the water
+  [[22,92,22],[45,72,13],[116,76,17],[140,98,15],[64,63,8],[100,61,10]].map(([x,y,n])=>tent(x,y,n,x,0));
+  box(45,88,7,56,0);box(108,88,7,56,0);disc(48,86,5,5,0);disc(111,86,5,5,0);
+  disc(80,112,30,8,0);box(50,112,60,32,0);
+  disc(80,100-k,17,6,3);disc(80,101-k,17,6,0);box(64,101-k,33,k+12,0);
+  disc(80,87-k,7,7,3);disc(80,88-k,7,7,0)
+},
+
+draw=()=>{
+  F.set(G);
+  zm=1;fd=0;
+  // a dotted grid over whatever tiles are still bare
+  for(let i=W*TOP;i<W*H;i++)F[i]||(i%W%16<1||((i/W|0)-TOP)%16<1)&&(i%W+(i/W|0)-TOP)%2&&(F[i]=1);
+  if(st){
+    Q.map(q=>spr(S[5],q[0],q[1],0,1,tm&16?3:2));
+    E.map(e=>spr(S[e.t%4],e.x,e.y+(tm+e.x>>3&1),e.f,e.t>3?2:1));
+    if(bh>0||bd>0){
+      if(bk){
+        // the ring on the floor, dotted while it hunts and solid once it has stopped
+        if(bh>0&&wt<0)for(let i=24;i--;)(wt>-20||i%2)&&box(mX+Math.cos(i*.262)*8-1,mY+Math.sin(i*.262)*6-1,2,2,wt>-20||tm&8?3:0);
+        // the tentacle standing in it, then lying along its slap
+        if(bh>0&&wt>=0&&wt<30){let n=Math.min(28,wt*6,(30-wt)*4);if(wt>10&&wt<18)for(;n--;)box(mX+Math.cos(wa)*n-2,mY+Math.sin(wa)*n-2,5,5,n%5?3:0);else tent(mX,mY,n,tm*.3)}
+        SQ.map((q,i)=>{if(q<4){let x=(i/28|0)%34,y=bY+i%28+(i>951)*28,v=bi>14||bd&2?3:+q;put(bX+33-x,y,v);put(bX+34+x,y,v)}})
+      }else{
+        // the beam: a blinking dotted line while she aims, a solid one when it fires
+        if(bh>0&&wt>0&&wt<48)for(let i=4,k=wt>40;i<180;i+=k?1:6)box(bX+4+Math.cos(wa)*i,bY+38+Math.sin(wa)*i,k?3:2,k?3:2,k||tm&4?3:2);
+        BS.map((q,i)=>q<4&&put(bX+(i/28|0)%68,bY+i%28+(i>1903)*28,bi>14||bd&2?3:+q))  // she flashes bone when hit
+      }
+    }
+    B.map(b=>{for(let k=4;k--;)put(b[0]+k%2,b[1]+(k>>1),tm&4?3:2)});
+    if(st&1||st==4&&dt<100){
+      for(let n=5+u[0],i=1;i<n;i++)put(px+(bx-px)*i/n,py+(by-py)*i/n,3);
+      spr(S[6],bx,by,0,1+u[1]);
+      (inv<0||tm&4)&&spr(S[4],px,py,bx<px)
+    }
+    D.map(d=>put(d[0],d[1],d[5]));
+    F.fill(0,0,TOP*W);
+    st<4&&F.fill(2,8*W,8*W+W*xp/(4+lv*lv));  // kills until the next upgrade
+    bh>0&&(F.fill(3,9*W,9*W+W*bh/bm),F.copyWithin(10*W,9*W,10*W));  // boss health along the top wall
+    mt>0&&(txt(m1,84,2),txt(m2,100));
+    for(let i=st<4&&hp;i--;)spr(S[5],5+i*9,4,0,1,2);
+    let s=st<4?''+sc:'';
+    txt(s,2,1,3,W-1-s.length*4);
+    st<4&&ct>0&&cb>1&&txt('X'+cb,2,1,2)
+  }
+  // title: a blood moon behind a dead tree, the name on its plaque, the three best on this machine, and - once the game
+  // has been finished here - infinity mode
+  if(!st){
+    for(let i=W*H;i--;)F[i]=i<72*W&&dk(i)<i/1500;  // a sky that reddens toward the horizon
+    for(let i=30;i--;)disc(i*37%W,i*53%76,9+i%9,2+i%3,2),disc(i*37%W,i*53%76+1,9+i%9,2+i%3,1);  // cloud, lit along its top
+    disc(80,45,42,42,3);disc(81,46,42,42,2);  // the moon and its bright limb
+    for(let i=8;i--;)disc(54+i*29%52,20+i*17%44,4+i%4*3,3+i%3*2,1);  // its seas
+    br(160,34,3.4,44);  // a dead tree leans in
+    box(4,71,152,32,1);box(5,72,150,30,0);  // the plaque
+    // the name, in its own letters: a pixel is bone where nothing is up and left of it, so every stroke gets a lit edge
+    [...'01234516278'].map((c,j)=>{for(let i=308,k;i--;)TF[k=c*308+i]>0&&put(11+j*12+(j>3)*6+i/28,70+i%28,TF[k-29]>0?2:3)});
+    tm&32&&txt('TOUCH TO START',107,1,2);
+    RK.map((r,i)=>txt(i+1+' '+r[0]+' '+r[1],115+i*7));
+    won&&txt('+ INFINITY +',138,1,2)
+  }
+  if(st==3){
+    F.fill(0,22*W,36*W);txt(op[0]>4?'+ AWAKEN +':'LEVEL UP',24,2,2);
+    // one card per upgrade, each dropping in nine frames after the last
+    op.map((o,i)=>{
+      let t=dt-6-i*9;
+      if(t<0)return;
+      let h=i==hov()&&dt>35,x=7+50*i+(3-op.length)*25,y=t<6?40-(6-t)**2*4:h?37:40,cx=x+23,[a,b]=UP[o].split(' ');
+      box(x,y,46,70,h?2:3);  // the card under the pointer lifts and turns red
+      if(t>8){  // it lands as a blank slab of bone, then shows its face
+        box(x+2,y+2,42,66,0);
+        // icon: ball on a chain, big ball, ball in orbit, big you, big heart
+        o%2?spr(S[o>2?4:6],cx,y+19,0,2):o>3?spr(S[5],cx,y+19,0,2,2):
+          (spr(S[6],cx+9,y+(o?19:11)),[...Array(10)].map((_,k)=>o?put(cx+Math.cos(k*.63)*9,y+19+Math.sin(k*.63)*9,3):k<5&&put(cx-8+k*3,y+28-k*3,3)));
+        txt(a,y+38,1,3,cx-a.length*2);txt(b,y+46,1,3,cx-b.length*2);
+        // pips: taken, the one this card gives, still to come
+        for(let k=MX[o];k--;)box(cx-MX[o]*2.5+1+k*5,y+58,3,3,k<u[o]?3:k>u[o]?1:2)
+      }
+    })
+  }
+  if(st==2&&dt>50)
+    F.fill(0,38*W,112*W),
+    txt('ECLIPSED',44,4,2),txt('+ '+dq+' +',69),txt('SCORE '+sc,80,1,2),
+    tm&32&&txt('TOUCH TO START',107,1,2);
+  // the end. The last frame of play goes dark; the throne room comes up; you sit; the view pulls back and dims by half;
+  // the story and the numbers scroll through the middle of the screen.
+  if(st==4){
+    let t=dt-470;
+    fd=dt/5;
+    if(dt>99){
+      scene(cl(12-(dt-170)/10|0,0,12));fd=18-(dt-100)/4;zm=cl(2.6-(dt-230)/140,1,2.6);
+      for(let i=W*H;i--;)dk(i)<t/6&&dk(i)<8&&(F[i]=0);  // the picture dims by half, under the words
+      ED.map((s,i)=>{let y=130+i*10-t*.18;if(y>54&&y<126){for(i=9;i--;)txt(s,y+i%3-1,1,0,79-s.length*2+(i/3|0));txt(s,y)}})  // the words rise out of the bottom, each letter edged in black so it reads over the light, and are gone at the horizon
+    }
+  }
+  // the board: a score in the best three gets a name of up to five letters
+  if(st==5)
+    F.fill(0,TOP*W),txt('YOUR NAME',22,1,2),txt(ne,36,3),
+    [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ<'].map((ch,i)=>txt(ch,64+(i/7|0)*16,2,3,17+i%7*20)),txt('OK',112,2,2,132);
+  // after the credits: the board, and a choice - the left half of the screen goes back to the title, the right half plays on without bosses
+  if(st>5)
+    F.fill(0,TOP*W),RK.map((r,i)=>txt(i+1+' '+r[0]+' '+r[1],36+i*10)),txt('MAIN',96,2,3,24),txt('INFINITY',96,2,2,88);
+  // the pointer, drawn last so it stays on top of the upgrade menu
+  if(st&1||st>4){let x=st>2?mx:tx,y=st>2?my:ty;put(x-2,y,3);put(x+2,y,3);put(x,y-2,3);put(x,y+2,3)}
+  // to the screen: zoomed about the throne and dithered to black at the end; a hit flashes the palette inside out
+  for(let i=W*H;i--;){let x=i%W,y=i/W|0;U[i]=P[dk(i)<fd?0:F[(100+(y-100)/zm|0)*W+80+(x-80)/zm|0]^(fl>0&&3)]}
+  X.putImageData(I,0,0);
+  cq.style.transform=sh>0?`translate(${(rnd()*3-1.5|0)*Z}px,${(rnd()*3-1.5|0)*Z}px)`:''
+},
+
+loop=t=>{
+  requestAnimationFrame(loop);
+  acc+=Math.min(.1,(t-T)/1e3||0);T=t;
+  for(;acc>1/60;acc-=1/60){
+    hs-->0||st>2||ph==2&&dt%3||step();sh--;fl--;dt++;  // hs: a heavy hit freezes the world for a few frames; the flood runs at a third speed
+    // the ending's timed moments: the stage is cleared in the dark, and at the end of the credits comes the board or the choice
+    if(st==4)
+      dt==100&&(E=[],B=[],Q=[],D=[]),
+      dt>1200+ED.length*56&&(st=qual()?5:6,ne='');
+    // each card lands with a thud, a shake, and a squirt from underneath
+    st==3&&dt%9==3&&dt>9&&dt<12+9*op.length&&(sh=6,snd(80,.3,0,.5),snd(500,.2,1,.3),splat(dt/9*50-37+(3-op.length)*25,111,0,2,16))
+  }
+  mus();
+  draw()
+},
+
+// pointer position in game pixels
+pos=e=>{let r=cq.getBoundingClientRect(),z=r.width/W;mx=(e.clientX-r.left)/z;my=(e.clientY-r.top)/z};
+
+onpointerdown=e=>{
+  pos(e);lx=mx;ly=my;
+  if(st>5)nf=mx>80,st=0,nf&&go();
+  else if(st>4){
+    // the letter grid: seven columns, four rows; then delete, and OK
+    let i=Math.floor((mx-10)/20)+7*Math.floor((my-60)/16);
+    mx>9&&mx<150&&(i<26?i>=0&&ne.length<5&&(ne+=CH[i+11]):i<27?ne=ne.slice(0,-1):i<28&&ne&&(RK.push([ne,sc]),RK=RK.sort((a,b)=>b[1]-a[1]).slice(0,3),st=ph==3?6:0));
+    try{localStorage.pulpR=JSON.stringify(RK)}catch(e){}
+  }
+  else if(st==2&&dt>59&&qual())st=5,ne='';  // a death good enough for the board
+  else st||(nf=won&&my>134),go(),pick()  // on the title, the bottom line starts infinity mode
+};
+// a mouse is followed directly; a finger drags the target around instead, so it never covers you
+onpointermove=e=>{
+  pos(e);
+  if(e.pointerType=='mouse')tx=mx,ty=my;
+  else tx+=(mx-lx)*1.5,ty+=(my-ly)*1.5,lx=mx,ly=my
+};
+(onresize=()=>{Z=Math.min(innerWidth/W,innerHeight/H);Z=Z>1?Z|0:Z;cq.style.width=W*Z+'px'})();
+
+// sound is set up at once, so the title theme plays straight away wherever the browser allows it. Where it does not,
+// the context waits suspended; letting go of the first touch resumes it.
+try{A=new AudioContext;M=A.createDynamicsCompressor();M.connect(A.destination);NB=A.createBuffer(1,9e3,3e4);for(let b=NB.getChannelData(0),i=9e3;i--;)b[i]=rnd()*2-1;onpointerup=e=>A.resume()}catch(e){}
+loop(0)
+</script>

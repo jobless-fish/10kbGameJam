@@ -1,0 +1,15 @@
+{
+  "name": "luna-cruenta",
+  "version": "1.0.0",
+  "description": "A splatter arcade game in four colours and under 10KB, for the 10 Kilobytes Jam.",
+  "private": true,
+  "scripts": {
+    "build": "node tools/build.js",
+    "search": "node tools/build.js --search 1500",
+    "test-build": "node tools/build.js --test"
+  },
+  "devDependencies": {
+    "roadroller": "2.1.0",
+    "terser": "5.51.2"
+  }
+}
